@@ -1,0 +1,148 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # report tee's exit status and pass on nvcc errors
+    shell: bash -eo pipefail {0}
+
+jobs:
+  # -----------------------------------------------------
+  # Gate 1: compile every kernel for the real target arch
+  # nvcc + ptxas run inside the pinned CUDA container
+  # -----------------------------------------------------
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CUDA_IMAGE: nvidia/cuda:13.3.1-devel-ubuntu24.04@sha256:4ff859525f99de5782aa73607ce24219b07dddd48d12b97c1c301d7e1cfb0a87
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu24.04@sha256:4ff859525f99de5782aa73607ce24219b07dddd48d12b97c1c301d7e1cfb0a87
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain identity
+        run: |
+          mkdir -p build
+          {
+            echo "=== provenance ==="
+            echo "commit:  $GITHUB_SHA"
+            echo "ref:     $GITHUB_REF"
+            echo "run:     $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "image:   $CUDA_IMAGE"
+            echo
+            echo "=== nvcc ==="
+            nvcc --version
+            echo
+            echo "=== ptxas ==="
+            ptxas --version
+            echo
+            echo "=== host compiler ==="
+            g++ --version
+            echo
+            echo "=== architecture ==="
+            uname -m
+          } | tee build/toolchain.txt
+
+      - name: Compile all kernels for sm_120 # to be updated for H100 and B100 later experiments
+        run: |
+          shopt -s nullglob globstar
+          files=(kernels/**/*.cu)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No .cu files found under kernels/ -- nothing to gate."
+            exit 1
+          fi
+          fail=0
+          for f in "${files[@]}"; do
+            rel="${f#kernels/}"
+            name="${rel%.cu}"
+            name="${name//\//__}"
+            echo "::group::$f"
+            nvcc -std=c++17 -arch=sm_120 -c "$f" -o "build/$name.o" \
+                 -I "$(dirname "$f")" -I "$(dirname "$f")/include" \
+                 -Werror cross-execution-space-call,reorder \
+                 -Xptxas -v -Xcompiler -Wall,-Wextra \
+                 2>&1 | tee "build/$name.ptxas.txt" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: Resource-usage summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          reports=(build/*.ptxas.txt)
+          {
+            echo "### ptxas resource usage"
+            echo '```'
+            if [ ${#reports[@]} -eq 0 ]; then
+              echo "(no ptxas output -- the compile step produced nothing)"
+            else
+              grep -h -E "ptxas info|registers|spill|stack frame|lmem|smem" "${reports[@]}" \
+                || echo "(none reported)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ ${#reports[@]} -gt 0 ] \
+             && grep -Eq '[1-9][0-9]* bytes spill (stores|loads)' "${reports[@]}"; then
+            echo "::warning::register spills detected -- see the job summary"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: compile-evidence
+          path: build/*.txt
+          retention-days: 30
+
+  # ------------------------------------------
+  # Gate 2: everything that runs without a GPU
+  # ------------------------------------------
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: python -m pip install -r requirements-dev.txt
+
+      - name: GPU-free tests
+        run: python -m pytest -v -m "not gpu" verifier/tests_public
+
+      - name: Environment manifest
+        if: always()
+        run: |
+          mkdir -p build
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "runner: ${{ runner.os }} ${{ runner.arch }}"
+            echo
+            python -VV
+            echo
+            python -m pip freeze
+          } > build/python-env.txt
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: python-env
+          path: build/python-env.txt
+          retention-days: 30
