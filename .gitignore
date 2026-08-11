@@ -1,21 +1,67 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+
 .venv/
-build/
-*.o
-*.so
+venv/
+
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+coverage.xml
+htmlcov/
+
+.ipynb_checkpoints/
+
+# CUDA
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+*.ptx
+*.cubin
+*.fatbin
+
+compile_commands.json
+
+# Local caches
 .cache/
+.triton/
+
+# Profiling artifacts
 *.nsys-rep
 *.ncu-rep
 *.qdrep
-*.sqlite
-.env
-*.pem
-perf-raw/  
-checkpoints/  
-*.pt  
+
+perf-raw/
+
+# ML artifacts / checkpoints
+checkpoints/
+*.pt
+*.pth
 *.safetensors
-.vscode/  
-.idea/  
+
+# Local configuration / secrets
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+
+# Editors / OS
+.vscode/
+.idea/
+
 .DS_Store
+Thumbs.db
